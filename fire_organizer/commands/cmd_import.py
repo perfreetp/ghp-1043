@@ -39,9 +39,22 @@ def _safe_str(val):
     return str(val).strip()
 
 
+def _parse_sheet_arg(sheet: str):
+    """将 --sheet 参数解析为 int 序号或 str 名称。"""
+    if sheet is None:
+        return 0
+    s = str(sheet).strip()
+    if s.isdigit():
+        try:
+            return int(s)
+        except ValueError:
+            return s
+    return s
+
+
 @click.command()
 @click.argument("filepath", type=click.Path(exists=True))
-@click.option("--sheet", "-s", default=0, help="Excel 工作表名称或序号（默认第1个）")
+@click.option("--sheet", "-s", default="0", help="Excel 工作表序号（0/1）或名称")
 @click.option("--area", "-a", default="", help="指定区域（覆盖文件中的区域）")
 @click.option("--operator", "-o", default="system", help="操作人")
 @click.option("--append/--replace", default=True, help="追加模式（默认追加，--replace 覆盖）")
@@ -60,9 +73,10 @@ def import_cmd(filepath: str, sheet: str, area: str, operator: str, append: bool
         return
 
     fp = Path(filepath)
+    sheet_arg = _parse_sheet_arg(sheet)
     try:
         if fp.suffix.lower() in (".xlsx", ".xls"):
-            df = pd.read_excel(fp, sheet_name=sheet if isinstance(sheet, int) else sheet)
+            df = pd.read_excel(fp, sheet_name=sheet_arg)
         elif fp.suffix.lower() == ".csv":
             df = pd.read_csv(fp)
         else:

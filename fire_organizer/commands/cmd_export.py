@@ -232,14 +232,40 @@ def export_package(name: str, area: str, include_reports: bool,
 
     if include_attachments:
         copied = 0
-        for root, dirs, files in os.walk(storage.attachments_dir):
-            for f in files:
-                src = Path(root) / f
-                rel = src.relative_to(storage.attachments_dir)
-                dst = pkg_root / "07_附件照片" / rel
+        if area:
+            relevant_paths = set()
+            for p in plans:
+                for photo in p.photo_paths:
+                    if photo:
+                        relevant_paths.add(photo)
+            for i in issues:
+                for photo in i.photo_before:
+                    if photo:
+                        relevant_paths.add(photo)
+                for photo in i.photo_after:
+                    if photo:
+                        relevant_paths.add(photo)
+            for photo_rel in relevant_paths:
+                src = storage.project_path / photo_rel
+                if not src.exists():
+                    continue
+                try:
+                    rel_to_att = src.relative_to(storage.attachments_dir)
+                except ValueError:
+                    continue
+                dst = pkg_root / "07_附件照片" / rel_to_att
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, dst)
                 copied += 1
+        else:
+            for root, dirs, files in os.walk(storage.attachments_dir):
+                for f in files:
+                    src = Path(root) / f
+                    rel = src.relative_to(storage.attachments_dir)
+                    dst = pkg_root / "07_附件照片" / rel
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dst)
+                    copied += 1
         click.echo(f"  复制附件：{copied} 个")
 
     logs_dir = pkg_root / "01_项目信息"

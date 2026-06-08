@@ -79,10 +79,11 @@ def issue_list(area: str, building: str, status: str, severity: str, overdue: bo
 @click.option("--deadline", "-e", required=True, help="整改期限 (YYYY-MM-DD)")
 @click.option("--reporter", "-R", default="system", help="登记人")
 @click.option("--building", "-b", default="", help="楼栋（可从设备自动获取）")
+@click.option("--floor", "-f", default="", help="楼层（可从设备自动获取）")
 @click.option("--area", "-a", default="", help="区域")
 def issue_add(plan_id: str, device_id: str, description: str, severity: str,
               report_date: Optional[str], deadline: str, reporter: str,
-              building: str, area: str):
+              building: str, floor: str, area: str):
     """登记一条新隐患。"""
     storage = Storage()
     if not storage.is_initialized():
@@ -93,6 +94,7 @@ def issue_add(plan_id: str, device_id: str, description: str, severity: str,
     dev = next((d for d in devices if d.device_id == device_id), None)
     if dev:
         building = building or dev.building
+        floor = floor or dev.floor
         area = area or dev.area
     elif not building:
         click.echo(click.style("警告：未找到该设备，请指定 --building 参数", fg="yellow"))
@@ -111,6 +113,7 @@ def issue_add(plan_id: str, device_id: str, description: str, severity: str,
         deadline=deadline,
         reporter=reporter,
         building=building,
+        floor=floor,
         area=area,
         status="待整改",
     )

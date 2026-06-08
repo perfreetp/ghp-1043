@@ -108,6 +108,7 @@ class Issue:
         deadline: str,
         reporter: str,
         building: str = "",
+        floor: str = "",
         area: str = "",
         status: str = "待整改",
         rectification: str = "",
@@ -125,6 +126,7 @@ class Issue:
         self.deadline = deadline
         self.reporter = reporter
         self.building = building
+        self.floor = floor
         self.area = area
         self.status = status
         self.rectification = rectification
@@ -154,6 +156,7 @@ class Issue:
             "deadline": self.deadline,
             "reporter": self.reporter,
             "building": self.building,
+            "floor": self.floor,
             "area": self.area,
             "status": self.status,
             "rectification": self.rectification,
