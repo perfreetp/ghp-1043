@@ -1,0 +1,74 @@
+[
+  {
+    "log_id": "LOG9CFF1696DA36",
+    "action": "init",
+    "target_type": "project",
+    "target_id": "测试项目v2",
+    "operator": "张工",
+    "timestamp": "2026-06-09 01:07:59",
+    "details": "初始化项目: 测试项目v2"
+  },
+  {
+    "log_id": "LOG78B34DA43CB5",
+    "action": "import",
+    "target_type": "device",
+    "target_id": "25",
+    "operator": "system",
+    "timestamp": "2026-06-09 01:07:59",
+    "details": "导入设备清单: test_devices.csv, 新增25台, 跳过0条"
+  },
+  {
+    "log_id": "LOGF8A544028CCC",
+    "action": "plan",
+    "target_type": "plan",
+    "target_id": "13",
+    "operator": "system",
+    "timestamp": "2026-06-09 01:08:00",
+    "details": "生成巡检计划: 2026-06-09, 共13条, 覆盖1个楼栋"
+  },
+  {
+    "log_id": "LOG8A4CD40E8FDC",
+    "action": "plan_import",
+    "target_type": "plan",
+    "target_id": "4条",
+    "operator": "system",
+    "timestamp": "2026-06-09 01:10:13",
+    "details": "导入巡检结果: 填写好的巡检结果.csv, 成功4条, 跳过3条, 快照SN8E10E754B864"
+  },
+  {
+    "log_id": "LOG0AE8D3D31AA0",
+    "action": "report_summary",
+    "target_type": "report",
+    "target_id": "2026-06",
+    "operator": "system",
+    "timestamp": "2026-06-09 01:10:40",
+    "details": "生成月度汇总报告: 2026年06月"
+  },
+  {
+    "log_id": "LOG8C72880CB019",
+    "action": "issue_add",
+    "target_type": "issue",
+    "target_id": "IS483F91457718",
+    "operator": "system",
+    "timestamp": "2026-06-09 01:11:06",
+    "details": "登记隐患[一般]: FH-001, 期限2026-06-20"
+  },
+  {
+    "log_id": "LOG37E7BB313057",
+    "action": "plan_rollback",
+    "target_type": "snapshot",
+    "target_id": "SN8E10E754B864",
+    "operator": "system",
+    "timestamp": "2026-06-09 01:12:13",
+    "details": "回滚导入快照: SN8E10E754B864, 恢复4条计划"
+  },
+  {
+    "log_id": "LOG71E172A926FC",
+    "action": "report_summary",
+    "target_type": "report",
+    "target_id": "2026-06",
+    "operator": "system",
+    "timestamp": "2026-06-09 01:12:15",
+    "details": "生成月度汇总报告: 2026年06月"
+  }
+]

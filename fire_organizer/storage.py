@@ -17,16 +17,52 @@ PLANS_FILE = "plans.json"
 ISSUES_FILE = "issues.json"
 LOGS_FILE = "logs.json"
 CONFIG_FILE = "config.json"
+SNAPSHOTS_DIR = "_snapshots"
 ATTACHMENTS_DIR = "attachments"
 EXPORTS_DIR = "exports"
 REPORTS_DIR = "reports"
 IMPORTS_DIR = "imports"
 
 
+class Snapshot:
+    """导入前快照，用于回滚。"""
+
+    def __init__(
+        self,
+        snapshot_id: str,
+        created_at: str,
+        operator: str,
+        source_file: str,
+        plan_ids_affected: List[str],
+        copied_attachments: List[str],
+    ):
+        self.snapshot_id = snapshot_id
+        self.created_at = created_at
+        self.operator = operator
+        self.source_file = source_file
+        self.plan_ids_affected = plan_ids_affected
+        self.copied_attachments = copied_attachments
+
+    def to_dict(self) -> Dict:
+        return {
+            "snapshot_id": self.snapshot_id,
+            "created_at": self.created_at,
+            "operator": self.operator,
+            "source_file": self.source_file,
+            "plan_ids_affected": self.plan_ids_affected,
+            "copied_attachments": self.copied_attachments,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "Snapshot":
+        return cls(**data)
+
+
 class Storage:
     def __init__(self, project_path: str = "."):
         self.project_path = Path(project_path).resolve()
         self.data_dir = self.project_path / DATA_DIR
+        self.snapshots_dir = self.data_dir / SNAPSHOTS_DIR
         self.attachments_dir = self.project_path / ATTACHMENTS_DIR
         self.exports_dir = self.project_path / EXPORTS_DIR
         self.reports_dir = self.project_path / REPORTS_DIR
@@ -130,3 +166,66 @@ class Storage:
         dst = target_dir / new_name
         shutil.copy2(src, dst)
         return str(dst.relative_to(self.project_path))
+
+    def save_plan_snapshot(
+        self, operator: str, source_file: str,
+        original_plans: List, affected_plan_ids: List[str],
+        copied_attachments: List[str],
+    ) -> Snapshot:
+        """保存 plans 快照，用于回滚。"""
+        self.snapshots_dir.mkdir(parents=True, exist_ok=True)
+        snapshot_id = generate_id("SN")
+        created_at = now_str()
+        plans_backup_path = self.snapshots_dir / f"{snapshot_id}_plans.json"
+        self._write_json(plans_backup_path, [p.to_dict() for p in original_plans])
+        snapshot = Snapshot(
+            snapshot_id=snapshot_id,
+            created_at=created_at,
+            operator=operator,
+            source_file=source_file,
+            plan_ids_affected=affected_plan_ids,
+            copied_attachments=copied_attachments,
+        )
+        index_path = self.snapshots_dir / "index.json"
+        index = self._read_json(index_path) or []
+        index.append(snapshot.to_dict())
+        self._write_json(index_path, index)
+        return snapshot
+
+    def list_plan_snapshots(self) -> List[Snapshot]:
+        """列出所有导入快照。"""
+        index_path = self.snapshots_dir / "index.json"
+        if not index_path.exists():
+            return []
+        data = self._read_json(index_path) or []
+        return [Snapshot.from_dict(d) for d in data]
+
+    def rollback_plan_snapshot(self, snapshot_id: str) -> Optional[Snapshot]:
+        """按快照 ID 回滚 plans 并清理附件，成功返回快照。"""
+        snapshots = self.list_plan_snapshots()
+        target = next((s for s in snapshots if s.snapshot_id == snapshot_id), None)
+        if target is None:
+            return None
+        backup_file = self.snapshots_dir / f"{snapshot_id}_plans.json"
+        if backup_file.exists():
+            plans_data = self._read_json(backup_file)
+            restored = [PlanItem.from_dict(d) for d in plans_data]
+            self.save_plans(restored)
+        deleted_attach = 0
+        for rel in target.copied_attachments:
+            p = self.project_path / rel
+            if p.exists():
+                try:
+                    p.unlink()
+                    deleted_attach += 1
+                except Exception:
+                    pass
+        index = [s for s in snapshots if s.snapshot_id != snapshot_id]
+        self._write_json(self.snapshots_dir / "index.json", [s.to_dict() for s in index])
+        try:
+            if backup_file.exists():
+                backup_file.unlink()
+        except Exception:
+            pass
+        target.copied_attachments = [f"已删除({deleted_attach}个)"]
+        return target

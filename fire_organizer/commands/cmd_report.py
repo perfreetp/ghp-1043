@@ -28,7 +28,7 @@ def report():
 @click.option("--month", "-m", type=int, default=None, help="月份（默认本月）")
 @click.option("--area", "-a", default="", help="按区域筛选")
 @click.option("--building", "-b", default="", help="按楼栋筛选")
-def report_summary(year: int, month: int, area: str, building: str):
+def report_summary(year, month, area, building):
     """按月份汇总任务完成情况。"""
     storage = Storage()
     if not storage.is_initialized():
@@ -47,15 +47,22 @@ def report_summary(year: int, month: int, area: str, building: str):
     devices = storage.get_devices()
 
     month_plans = [p for p in plans if is_in_month(p.plan_date, year, month)]
+    plans_checked_this_month = [
+        p for p in plans
+        if p.check_date and is_in_month(p.check_date, year, month)
+        and p.status in ("已完成", "有隐患")
+    ]
     month_issues = [i for i in issues if is_in_month(i.report_date, year, month)]
     month_closed = [i for i in issues if i.close_date and is_in_month(i.close_date, year, month)]
 
     if area:
         month_plans = filter_by_area(month_plans, area)
+        plans_checked_this_month = filter_by_area(plans_checked_this_month, area)
         month_issues = filter_by_area(month_issues, area)
         month_closed = filter_by_area(month_closed, area)
     if building:
         month_plans = filter_by_building(month_plans, building)
+        plans_checked_this_month = filter_by_building(plans_checked_this_month, building)
         month_issues = filter_by_building(month_issues, building)
         month_closed = filter_by_building(month_closed, building)
 
@@ -68,14 +75,19 @@ def report_summary(year: int, month: int, area: str, building: str):
     click.echo("")
     click.echo(click.style("【巡检计划统计】", fg="yellow", bold=True))
     total_p = len(month_plans)
-    done_p = len([p for p in month_plans if p.status in ("已完成", "有隐患")])
+    done_plan = len([p for p in month_plans if p.status in ("已完成", "有隐患")])
+    done_actual = len(plans_checked_this_month)
     pending_p = len([p for p in month_plans if p.status == "待执行"])
     issue_p = len([p for p in month_plans if p.status == "有隐患"])
-    rate_p = (done_p / total_p * 100) if total_p > 0 else 0
-    click.echo(f"  计划总数：{total_p} 项")
-    click.echo(f"  已完成：  {done_p} 项 ({rate_p:.1f}%)")
+    issue_actual = len([p for p in plans_checked_this_month if p.status == "有隐患"])
+    rate_p = (done_plan / total_p * 100) if total_p > 0 else 0
+    click.echo(f"  本月计划总数：{total_p} 项")
+    click.echo(f"  计划内已完成(按计划日期)：{done_plan} 项 ({rate_p:.1f}%)")
+    click.echo(click.style(f"  本月实际完成(按检查日期)：{done_actual} 项", fg="cyan", bold=True))
     click.echo(f"  待执行：  {pending_p} 项")
-    click.echo(f"  发现隐患：{issue_p} 项")
+    click.echo(f"  计划中发现隐患：{issue_p} 项")
+    if issue_actual != issue_p:
+        click.echo(f"  本月实际发现隐患：{issue_actual} 项")
 
     inspectors = defaultdict(lambda: {"total": 0, "done": 0})
     for p in month_plans:
@@ -198,7 +210,13 @@ def report_ledger(year: int, month: int, area: str, status: str, export: bool):
 
     if export and pd is not None:
         rows = []
+        dev_floor_map = {}
+        for dv in storage.get_devices():
+            dev_floor_map[dv.device_id] = dv.floor
         for i in filtered:
+            real_floor = i.floor
+            if not real_floor:
+                real_floor = dev_floor_map.get(i.device_id, "")
             rows.append({
                 "隐患编号": i.issue_id,
                 "设备编号": i.device_id,
@@ -206,7 +224,7 @@ def report_ledger(year: int, month: int, area: str, status: str, export: bool):
                 "状态": i.status,
                 "是否逾期": "是" if i.is_overdue else "否",
                 "楼栋": i.building,
-                "楼层": i.floor,
+                "楼层": real_floor,
                 "区域": i.area,
                 "发现日期": i.report_date,
                 "整改期限": i.deadline,
@@ -224,30 +242,40 @@ def report_ledger(year: int, month: int, area: str, status: str, export: bool):
 
 
 @report.command("inspection")
-@click.option("--date", "-d", default=None, help="检查日期 (YYYY-MM-DD，默认今天)")
+@click.option("--date", "-d", default=None, help="计划日期筛选 (YYYY-MM-DD)")
+@click.option("--check-date", "-c", default=None, help="实际检查日期筛选 (YYYY-MM-DD)")
 @click.option("--building", "-b", default="", help="按楼栋筛选")
 @click.option("--area", "-a", default="", help="按区域筛选")
 @click.option("--export", "-e", is_flag=True, help="导出为 Excel")
-def report_inspection(date: str, building: str, area: str, export: bool):
-    """输出检查报告。"""
+def report_inspection(date, check_date, building, area, export):
+    """输出检查报告（按计划日期或实际检查日期筛选）。"""
     storage = Storage()
     if not storage.is_initialized():
         click.echo(click.style("错误：请先运行 init 初始化项目", fg="red"))
         return
 
-    check_date = date or today_str()
     plans = storage.get_plans()
     devices = storage.get_devices()
     issues = storage.get_issues()
 
-    day_plans = [p for p in plans if p.plan_date == check_date]
+    if date:
+        day_plans = [p for p in plans if p.plan_date == date]
+        date_label = f"计划日期={date}"
+    elif check_date:
+        day_plans = [p for p in plans if p.check_date == check_date]
+        date_label = f"检查日期={check_date}"
+    else:
+        d = today_str()
+        day_plans = [p for p in plans if p.plan_date == d or p.check_date == d]
+        date_label = f"计划/检查日期={d}"
+
     if area:
         day_plans = filter_by_area(day_plans, area)
     if building:
         day_plans = filter_by_building(day_plans, building)
 
     if not day_plans:
-        click.echo(click.style(f"该日期无巡检计划：{check_date}", fg="yellow"))
+        click.echo(click.style(f"该条件下无记录：{date_label}", fg="yellow"))
         return
 
     dev_dict = {d.device_id: d for d in devices}
@@ -257,21 +285,24 @@ def report_inspection(date: str, building: str, area: str, export: bool):
             plan_issue_map[i.plan_id].append(i)
 
     click.echo(click.style(f"{'='*100}", fg="cyan", bold=True))
-    click.echo(click.style(f"  检查报告 - {check_date}", fg="cyan", bold=True))
+    click.echo(click.style(f"  检查报告 - {date_label}", fg="cyan", bold=True))
     click.echo(click.style(f"{'='*100}", fg="cyan", bold=True))
 
     total = len(day_plans)
     done = len([p for p in day_plans if p.status != "待执行"])
     has_issue = len([p for p in day_plans if p.status == "有隐患"])
     missing_photos = len([p for p in day_plans if p.status != "待执行" and not p.photo_paths])
+    overdue_checked = [p for p in day_plans if p.check_date and p.plan_date and p.check_date > p.plan_date]
 
     click.echo("")
-    click.echo(f"  计划总数：{total}")
+    click.echo(f"  涉及计划：{total}")
     click.echo(f"  已检查：{done} 项 ({done/total*100:.1f}%)")
     click.echo(f"  正常：{done - has_issue} 项")
     click.echo(f"  异常/隐患：{has_issue} 项")
     if missing_photos:
         click.echo(click.style(f"  缺照片：{missing_photos} 项", fg="red"))
+    if overdue_checked:
+        click.echo(click.style(f"  延期检查：{len(overdue_checked)} 项", fg="yellow"))
 
     click.echo("")
     click.echo(click.style("【详细记录】", fg="yellow", bold=True))
@@ -280,11 +311,18 @@ def report_inspection(date: str, building: str, area: str, export: bool):
         st_c = {"待执行": "white", "已完成": "green", "有隐患": "red"}.get(p.status, "white")
         p_issues = plan_issue_map.get(p.plan_id, [])
         issue_info = f" [隐患{len(p_issues)}条]" if p_issues else ""
+        plan_cd = f"  计划={p.plan_date}"
+        actual_cd = f" 实际={p.check_date or '(未检查)'}"
+        date_diff = click.style(" [延期]", fg="yellow") if (
+            p.check_date and p.plan_date and p.check_date > p.plan_date
+        ) else ""
         click.echo(
             f"  {click.style(p.status, fg=st_c):<10} | "
             f"{p.building:<10} {p.floor:<6} | "
             f"{p.device_id:<14} {dev.name if dev else '':<10} | "
-            f"巡检人:{p.inspector or '-':<10}"
+            f"巡检人:{p.inspector or '-':<8}"
+            f"{plan_cd} {actual_cd}"
+            f"{date_diff}"
             f"{issue_info}"
         )
         for iss in p_issues:
