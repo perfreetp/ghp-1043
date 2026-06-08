@@ -1,1 +1,33 @@
-[]
+[
+  {
+    "snapshot_id": "SN3FADB2E4C214",
+    "created_at": "2026-06-09 01:38:34",
+    "operator": "system",
+    "source_file": "填写好的巡检结果_v3.csv",
+    "plan_ids_affected": [
+      "PL45FFDB0672FD",
+      "PLF627D373409A",
+      "PLF3D7FC8E4C2F"
+    ],
+    "copied_attachments": [
+      "attachments\\PL45FFDB0672FD\\20260609_013834_FH001_灭火器.jpg",
+      "attachments\\PLF627D373409A\\20260609_013834_FH002_应急灯.jpg",
+      "attachments\\PLF3D7FC8E4C2F\\20260609_013834_FH003_消火栓.jpg",
+      "attachments\\PLF3D7FC8E4C2F\\20260609_013834_隐患照片1.jpg"
+    ],
+    "success_count": 3,
+    "skip_count": 4,
+    "warn_count": 4,
+    "diff_file_path": "D:\\TraeProjects\\1043\\exports\\导入差异_填写好的巡检结果_v3_2026-06-09.xlsx",
+    "status": "已回滚",
+    "rollback_at": "2026-06-09 01:38:59",
+    "rollback_detail": {
+      "restored_count": 2,
+      "skipped_manual_count": 1,
+      "skipped_missing_count": 0,
+      "deleted_attach_count": 3,
+      "retained_attach_count": 1,
+      "rollback_operator": "system"
+    }
+  }
+]

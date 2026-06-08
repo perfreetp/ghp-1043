@@ -70,21 +70,24 @@ def _infer_status(raw_status, raw_result):
     return "待执行"
 
 
-def _collect_changes(storage, df, copy_photos):
-    """核心：解析每一行，返回 changes（成功）和 skipped（跳过/警告）。"""
+def _collect_changes(storage, df, copy_photos, run_ts=None):
+    """核心：解析每一行，返回 changes（成功）和 skipped（跳过/警告）。
+    run_ts 为照片复制/预测使用的时间戳，保证 dry-run 与正式导入文件名一致。
+    """
     plans = storage.get_plans()
     plans_work = [copy.deepcopy(p) for p in plans]
     plan_map = {p.plan_id: p for p in plans_work}
 
+    if run_ts is None:
+        run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
     def _preview_photo_dst(p_path_str, plan_id):
-        """仅预测照片目标位置，不实际复制。返回相对项目路径。"""
+        """仅预测照片目标位置（使用统一 run_ts），不实际复制。返回相对项目路径。"""
         p_src = Path(p_path_str)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        new_name = f"{timestamp}_{p_src.name}"
-        subdir = plan_id
+        new_name = f"{run_ts}_{p_src.name}"
         dst = storage.attachments_dir
-        if subdir:
-            dst = dst / subdir
+        if plan_id:
+            dst = dst / plan_id
         rel = dst / new_name
         return str(rel.relative_to(storage.project_path))
 
@@ -181,7 +184,9 @@ def _collect_changes(storage, df, copy_photos):
                 predicted_dst = _preview_photo_dst(str(p_path), plan_id)
                 if copy_photos and exists_on_disk:
                     try:
-                        rel = storage.copy_attachment(str(p_path), plan_id)
+                        rel = storage.copy_attachment(
+                            str(p_path), plan_id, timestamp_override=run_ts
+                        )
                         new_photos_to_list.append(rel)
                         copied_attachments.append(rel)
                         photo_details.append({
@@ -427,8 +432,9 @@ def plan_import(filepath, sheet, operator, copy_photos, dry_run, export_diff):
     df = df.rename(columns=col_map)
 
     original_plans = storage.get_plans()
+    run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     plans_work, changes_list, skipped, copied_attachments, diff_rows = _collect_changes(
-        storage, df, copy_photos if not dry_run else False
+        storage, df, copy_photos if not dry_run else False, run_ts
     )
 
     warn_count = sum(len(v) for v in skipped.values())
@@ -461,16 +467,16 @@ def plan_import(filepath, sheet, operator, copy_photos, dry_run, export_diff):
                 f"{st_change:<28}{cd_change:<20}新增{c['photos_added']}张{warn_str}"
             )
             for pd_item in c.get("photo_details", []):
-                exist_mark = "✓" if pd_item["exists"] else click.style("✗ 源文件不存在", fg="red")
+                exist_mark = click.style("(存在)", fg="green") if pd_item["exists"] else click.style("(源文件不存在)", fg="red")
                 if dry_run:
                     click.echo(
                         f"        {click.style('照片会放到:', fg='cyan')} "
-                        f"{pd_item['src']} {exist_mark}  →  {pd_item['dst']}"
+                        f"{pd_item['src']} {exist_mark}  ->  {pd_item['dst']}"
                     )
                 elif pd_item["copied"]:
                     click.echo(
                         f"        {click.style('已复制:', fg='green')} "
-                        f"{pd_item['src']}  →  {pd_item['dst']}"
+                        f"{pd_item['src']}  ->  {pd_item['dst']}"
                     )
                 else:
                     click.echo(
@@ -601,6 +607,7 @@ def plan_rollback(snapshot_id, last, operator):
     skipped_manual = result["skipped_manual_count"]
     skipped_missing = result["skipped_missing_count"]
     deleted_attach = result["deleted_attach_count"]
+    retained_attach = result.get("retained_attach_count", 0)
 
     click.echo(click.style(f"回滚完成！", fg="green", bold=True))
     click.echo(f"  快照时间：{snap.created_at}")
@@ -611,7 +618,13 @@ def plan_rollback(snapshot_id, last, operator):
         click.echo(click.style(f"  ⚠ 跳过（之后已手工修改）：{skipped_manual} 条", fg="yellow"))
     if skipped_missing:
         click.echo(click.style(f"  ⚠ 跳过（计划已不存在）：{skipped_missing} 条", fg="yellow"))
-    click.echo(f"  清理附件：已删除 {deleted_attach} 个文件")
+    if deleted_attach:
+        click.echo(f"  清理附件：已删除 {deleted_attach} 个文件")
+    if retained_attach:
+        click.echo(click.style(
+            f"  保留附件：{retained_attach} 个（被跳过恢复的计划仍在引用，避免断链）",
+            fg="cyan"
+        ))
 
     storage.add_log(
         "plan_rollback", "snapshot", target_id,
@@ -634,16 +647,21 @@ def plan_imports():
         return
 
     click.echo(click.style(
-        f"{'快照ID':<18}{'创建时间':<22}{'操作人':<10}{'来源文件':<28}"
+        f"{'状态':<10}{'快照ID':<18}{'创建时间':<22}{'操作人':<10}{'来源文件':<26}"
         f"{'成功':<6}{'跳过':<6}{'警告':<6}{'附件数':<8}{'差异清单'}",
         fg="cyan", bold=True
     ))
-    click.echo("-" * 150)
+    click.echo("-" * 160)
     for s in reversed(snaps):
         diff_flag = "已导出" if s.diff_file_path else ""
+        st_raw = getattr(s, "status", "正常") or "正常"
+        if st_raw == "已回滚":
+            st_str = click.style("已回滚", fg="red", bold=True)
+        else:
+            st_str = click.style(st_raw, fg="green")
         click.echo(
-            f"{s.snapshot_id:<18}{s.created_at:<22}{s.operator:<10}"
-            f"{(s.source_file[:26]+'..') if len(s.source_file)>26 else s.source_file:<28}"
+            f"{st_str:<18}{s.snapshot_id:<18}{s.created_at:<22}{s.operator:<10}"
+            f"{(s.source_file[:24]+'..') if len(s.source_file)>24 else s.source_file:<26}"
             f"{s.success_count:<8}{s.skip_count:<8}{s.warn_count:<8}"
             f"{len(s.copied_attachments):<10}{diff_flag}"
         )
@@ -680,6 +698,29 @@ def plan_import_detail(snapshot_id, last):
     click.echo(click.style(f"{'='*130}", fg="cyan", bold=True))
     click.echo(click.style(f"  导入详情 - {target.snapshot_id}", fg="cyan", bold=True))
     click.echo(click.style(f"{'='*130}", fg="cyan", bold=True))
+    st_raw = getattr(target, "status", "正常") or "正常"
+    if st_raw == "已回滚":
+        click.echo(click.style(f"  【状态：已回滚】", fg="red", bold=True))
+        if getattr(target, "rollback_at", ""):
+            click.echo(f"  回滚时间：{target.rollback_at}")
+        rbd = getattr(target, "rollback_detail", {}) or {}
+        if rbd:
+            click.echo(click.style("  回滚详情：", fg="yellow", bold=True))
+            if rbd.get("restored_count"):
+                click.echo(f"    · 成功恢复计划：{rbd['restored_count']} 条")
+            if rbd.get("skipped_manual_count"):
+                click.echo(f"    · 跳过（手工修改）：{rbd['skipped_manual_count']} 条")
+            if rbd.get("skipped_missing_count"):
+                click.echo(f"    · 跳过（计划已删除）：{rbd['skipped_missing_count']} 条")
+            if rbd.get("deleted_attach_count"):
+                click.echo(f"    · 删除附件：{rbd['deleted_attach_count']} 个")
+            if rbd.get("retained_attach_count"):
+                click.echo(click.style(
+                    f"    · 保留附件（仍被跳过计划引用）：{rbd['retained_attach_count']} 个",
+                    fg="cyan"
+                ))
+    else:
+        click.echo(click.style(f"  状态：正常（未回滚）", fg="green"))
     click.echo(f"  创建时间：{target.created_at}")
     click.echo(f"  操作人：{target.operator}")
     click.echo(f"  来源文件：{target.source_file}")

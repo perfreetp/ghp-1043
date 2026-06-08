@@ -7,9 +7,9 @@
     "plan_date": "2026-06-09",
     "inspector": "",
     "area": "华东区",
-    "status": "有隐患",
+    "status": "已完成",
     "check_date": "2026-06-09",
-    "result": "压力正常/标签完好；正常检查；手工追加：后来发现密封垫老化",
+    "result": "压力正常/标签完好；正常检查",
     "photo_paths": [
       "attachments\\PL45FFDB0672FD\\20260609_013834_FH001_灭火器.jpg"
     ]
@@ -22,10 +22,12 @@
     "plan_date": "2026-06-09",
     "inspector": "",
     "area": "华东区",
-    "status": "待执行",
-    "check_date": null,
-    "result": "",
-    "photo_paths": []
+    "status": "已完成",
+    "check_date": "2026-06-10",
+    "result": "压力正常；延期1天检查",
+    "photo_paths": [
+      "attachments\\PLF627D373409A\\20260609_013834_FH002_应急灯.jpg"
+    ]
   },
   {
     "plan_id": "PLF3D7FC8E4C2F",
@@ -35,10 +37,13 @@
     "plan_date": "2026-06-09",
     "inspector": "",
     "area": "华东区",
-    "status": "待执行",
-    "check_date": null,
-    "result": "",
-    "photo_paths": []
+    "status": "有隐患",
+    "check_date": "2026-06-11",
+    "result": "压力不足；延期2天发现隐患",
+    "photo_paths": [
+      "attachments\\PLF3D7FC8E4C2F\\20260609_013834_隐患照片1.jpg",
+      "attachments\\PLF3D7FC8E4C2F\\20260609_013834_FH003_消火栓.jpg"
+    ]
   },
   {
     "plan_id": "PL6AAB0FDBE6AB",

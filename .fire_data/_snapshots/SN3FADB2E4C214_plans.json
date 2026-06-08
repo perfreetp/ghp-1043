@@ -7,12 +7,10 @@
     "plan_date": "2026-06-09",
     "inspector": "",
     "area": "华东区",
-    "status": "有隐患",
-    "check_date": "2026-06-09",
-    "result": "压力正常/标签完好；正常检查；手工追加：后来发现密封垫老化",
-    "photo_paths": [
-      "attachments\\PL45FFDB0672FD\\20260609_013834_FH001_灭火器.jpg"
-    ]
+    "status": "待执行",
+    "check_date": null,
+    "result": "",
+    "photo_paths": []
   },
   {
     "plan_id": "PLF627D373409A",

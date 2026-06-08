@@ -747,6 +747,34 @@ def report_package(year, month, area, building, zip):
                 "检查结果": (p.result or "")[:80],
             })
 
+    # ========== 如果 --zip：先复制附件建立「原路径→包内路径」映射 ==========
+    rel_to_pkg_path = {}
+    if zip:
+        import shutil as _shutil
+        attach_dst_dir = pkg_dir / "附件照片"
+        copied_rel = set()
+        for r in attach_rows:
+            rel = r["附件相对路径"]
+            if rel in copied_rel:
+                continue
+            src = storage.project_path / rel
+            if src.exists():
+                dst = attach_dst_dir / Path(rel).name
+                i = 1
+                orig_stem, orig_suffix = Path(rel).stem, Path(rel).suffix
+                while dst.exists():
+                    dst = attach_dst_dir / f"{orig_stem}_{i}{orig_suffix}"
+                    i += 1
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                _shutil.copy2(src, dst)
+                copied_rel.add(rel)
+                pkg_in_path = f"附件照片/{dst.name}"
+                rel_to_pkg_path[rel] = pkg_in_path
+
+    # ========== 回填 attach_rows 包内路径列 ==========
+    for r in attach_rows:
+        r["包内路径"] = rel_to_pkg_path.get(r["附件相对路径"], "")
+
     # ========== 写入 Excel ==========
     pkg_file = pkg_dir / f"月度检查包_{year}年{month:02d}月{area_suffix}{bld_suffix}.xlsx"
     with pd.ExcelWriter(pkg_file, engine="openpyxl") as writer:
@@ -757,31 +785,13 @@ def report_package(year, month, area, building, zip):
         pd.DataFrame(attach_rows).to_excel(writer, index=False, sheet_name="附件目录说明")
         pd.DataFrame(overdue_rows).to_excel(writer, index=False, sheet_name="延期完成计划")
 
-    # ========== 如果 --zip：复制附件并打包 ==========
+    # ========== zip 打包 ==========
+    zip_path_out = ""
     if zip:
-        import shutil as _shutil
-        # 复制相关附件到 pkg_dir/附件照片/
-        attach_dst_dir = pkg_dir / "附件照片"
-        copied_rel = set()
-        for r in attach_rows:
-            rel = r["附件相对路径"]
-            if rel in copied_rel:
-                continue
-            src = storage.project_path / rel
-            if src.exists():
-                dst = attach_dst_dir / Path(rel).name
-                # 避免同名覆盖
-                i = 1
-                while dst.exists():
-                    dst = attach_dst_dir / f"{Path(rel).stem}_{i}{Path(rel).suffix}"
-                    i += 1
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                _shutil.copy2(src, dst)
-                copied_rel.add(rel)
-        # 打 zip
+        import shutil as _shutil2
         zip_base = str(pkg_dir)
-        zip_path = _shutil.make_archive(zip_base, "zip", root_dir=pkg_dir.parent, base_dir=pkg_dir.name)
-        click.echo(click.style(f"已生成 zip 包：{zip_path}", fg="green", bold=True))
+        zip_path_out = _shutil2.make_archive(zip_base, "zip", root_dir=pkg_dir.parent, base_dir=pkg_dir.name)
+        click.echo(click.style(f"已生成 zip 包：{zip_path_out}", fg="green", bold=True))
 
     click.echo(click.style("=" * 80, fg="cyan", bold=True))
     click.echo(click.style(f"  月度检查包生成完成 - {year}年{month:02d}月{area_suffix}{bld_suffix}", fg="cyan", bold=True))
@@ -790,12 +800,12 @@ def report_package(year, month, area, building, zip):
     click.echo(f"  主文件：{pkg_file}")
     click.echo("")
     click.echo(f"  包含 Sheet：")
-    click.echo(f"    • 月度汇总 ({len(summary_rows)} 项指标)")
-    click.echo(f"    • 每日检查报告 ({len(day_dates)} 天, {len([r for r in inspection_rows if r['日期类型']==''])} 条记录)")
-    click.echo(f"    • 整改台账 ({len(ledger_rows)} 条)")
-    click.echo(f"    • 缺照片清单 ({len(missing_rows)} 项)")
-    click.echo(f"    • 附件目录说明 ({len(attach_rows)} 条照片映射)")
-    click.echo(f"    • 延期完成计划 ({len(overdue_rows)} 条)")
+    click.echo(f"    - 月度汇总 ({len(summary_rows)} 项指标)")
+    click.echo(f"    - 每日检查报告 ({len(day_dates)} 天, {len([r for r in inspection_rows if r['日期类型']==''])} 条记录)")
+    click.echo(f"    - 整改台账 ({len(ledger_rows)} 条)")
+    click.echo(f"    - 缺照片清单 ({len(missing_rows)} 项)")
+    click.echo(f"    - 附件目录说明 ({len(attach_rows)} 条照片映射)")
+    click.echo(f"    - 延期完成计划 ({len(overdue_rows)} 条)")
     if zip:
-        click.echo(f"    • 附件照片 ({len(copied_rel)} 个文件已复制)")
+        click.echo(f"    - 附件照片 ({len(copied_rel)} 个文件已复制)")
 

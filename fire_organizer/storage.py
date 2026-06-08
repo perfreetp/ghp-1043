@@ -27,6 +27,9 @@ IMPORTS_DIR = "imports"
 class Snapshot:
     """导入前快照，用于回滚和导入历史查询。"""
 
+    STATUS_NORMAL = "正常"
+    STATUS_ROLLED_BACK = "已回滚"
+
     def __init__(
         self,
         snapshot_id: str,
@@ -39,6 +42,9 @@ class Snapshot:
         skip_count: int = 0,
         warn_count: int = 0,
         diff_file_path: str = "",
+        status: str = "正常",
+        rollback_at: str = "",
+        rollback_detail: Optional[Dict] = None,
     ):
         self.snapshot_id = snapshot_id
         self.created_at = created_at
@@ -50,6 +56,9 @@ class Snapshot:
         self.skip_count = skip_count
         self.warn_count = warn_count
         self.diff_file_path = diff_file_path
+        self.status = status
+        self.rollback_at = rollback_at
+        self.rollback_detail = rollback_detail or {}
 
     def to_dict(self) -> Dict:
         return {
@@ -63,11 +72,30 @@ class Snapshot:
             "skip_count": self.skip_count,
             "warn_count": self.warn_count,
             "diff_file_path": self.diff_file_path,
+            "status": self.status,
+            "rollback_at": self.rollback_at,
+            "rollback_detail": self.rollback_detail,
         }
 
     @classmethod
     def from_dict(cls, data: Dict) -> "Snapshot":
-        return cls(**data)
+        safe_data = {k: data.get(k, v) for k, v in {
+            "snapshot_id": "",
+            "created_at": "",
+            "operator": "",
+            "source_file": "",
+            "plan_ids_affected": [],
+            "copied_attachments": [],
+            "success_count": 0,
+            "skip_count": 0,
+            "warn_count": 0,
+            "diff_file_path": "",
+            "status": "正常",
+            "rollback_at": "",
+            "rollback_detail": {},
+        }.items()}
+        safe_data.update({k: v for k, v in data.items() if k in safe_data})
+        return cls(**safe_data)
 
 
 class Storage:
@@ -165,7 +193,11 @@ class Storage:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
-    def copy_attachment(self, src_path: str, subdir: str = "") -> str:
+    def copy_attachment(self, src_path: str, subdir: str = "",
+                        timestamp_override: Optional[str] = None) -> str:
+        """复制附件到 attachments/{subdir}/，返回相对项目路径。
+        传 timestamp_override 可指定固定前缀，保证 dry-run 和正式导入的文件名一致。
+        """
         src = Path(src_path)
         if not src.exists():
             raise FileNotFoundError(f"文件不存在: {src_path}")
@@ -173,7 +205,10 @@ class Storage:
         if subdir:
             target_dir = target_dir / subdir
         target_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if timestamp_override:
+            timestamp = str(timestamp_override)
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         new_name = f"{timestamp}_{src.name}"
         dst = target_dir / new_name
         shutil.copy2(src, dst)
@@ -233,12 +268,15 @@ class Storage:
 
     def rollback_plan_snapshot(self, snapshot_id: str) -> Optional[Dict]:
         """按快照 ID 细粒度回滚：只恢复本次导入改过且之后未手工修改的计划。
-        返回 dict: {snapshot, restored_count, skipped_manual_count, deleted_attach_count}
+        被跳过的计划仍然引用的照片文件保留不删除；快照记录不物理删除，只标记为已回滚。
+        返回 dict: {snapshot, restored_count, skipped_manual_count, skipped_missing_count,
+                    deleted_attach_count, retained_attach_count}
         """
         snapshots = self.list_plan_snapshots()
-        target = next((s for s in snapshots if s.snapshot_id == snapshot_id), None)
-        if target is None:
+        target_idx = next((i for i, s in enumerate(snapshots) if s.snapshot_id == snapshot_id), None)
+        if target_idx is None:
             return None
+        target = snapshots[target_idx]
 
         orig_file = self.snapshots_dir / f"{snapshot_id}_plans.json"
         post_file = self.snapshots_dir / f"{snapshot_id}_plans_post.json"
@@ -260,14 +298,15 @@ class Storage:
         restored_count = 0
         skipped_manual_count = 0
         skipped_missing_count = 0
+        skipped_pids = []
         for pid in target.plan_ids_affected:
             cur_p = current_map.get(pid)
             if cur_p is None:
                 skipped_missing_count += 1
+                skipped_pids.append(pid)
                 continue
             post_p = post_map.get(pid) if has_post else None
             orig_p = orig_map.get(pid)
-            # 判断 cur 的关键字段是否仍等于 post（导入后状态）
             fields_eq = True
             if post_p is not None:
                 def _sig(p):
@@ -275,7 +314,6 @@ class Storage:
                 if _sig(cur_p) != _sig(post_p):
                     fields_eq = False
             if fields_eq and orig_p is not None:
-                # 恢复为导入前状态：只替换关键4字段，保留其他可能的新增字段
                 cur_p.status = orig_p.status
                 cur_p.check_date = orig_p.check_date
                 cur_p.result = orig_p.result
@@ -283,32 +321,65 @@ class Storage:
                 restored_count += 1
             elif not fields_eq:
                 skipped_manual_count += 1
+                skipped_pids.append(pid)
             else:
                 skipped_missing_count += 1
+                skipped_pids.append(pid)
 
-        # 保存修改后的 plans
         self.save_plans(current_plans)
 
-        # 3) 清理附件
-        deleted_attach = 0
-        for rel in target.copied_attachments:
-            p = self.project_path / rel
-            if p.exists():
-                try:
-                    p.unlink()
-                    deleted_attach += 1
-                except Exception:
-                    pass
+        # 3) 清理附件：仅删除 copied_attachments 中未被「跳过计划」仍引用的
+        #    收集所有跳过计划当前的 photo_paths（去重）
+        retained_by_skipped = set()
+        for pid in skipped_pids:
+            p = current_map.get(pid)
+            if p is None:
+                continue
+            for ph in (p.photo_paths or []):
+                retained_by_skipped.add(str(ph).replace("/", "\\"))
+                retained_by_skipped.add(str(ph).replace("\\", "/"))
+                retained_by_skipped.add(str(ph))
 
-        # 4) 清理快照文件并更新 index
-        index = [s for s in snapshots if s.snapshot_id != snapshot_id]
-        self._write_json(self.snapshots_dir / "index.json", [s.to_dict() for s in index])
-        for f in [orig_file, post_file, self.snapshots_dir / f"{snapshot_id}_diff.json"]:
+        deleted_attach = 0
+        retained_attach = 0
+        for rel in target.copied_attachments:
+            # 规范化：检查 rel 是否被跳过计划引用（用多种写法比对）
+            rel_norm = str(rel).replace("/", "\\")
+            is_referenced = False
+            for ref in retained_by_skipped:
+                if str(ref).replace("/", "\\") == rel_norm:
+                    is_referenced = True
+                    break
+            p = self.project_path / rel
+            if not p.exists():
+                continue
+            if is_referenced:
+                retained_attach += 1
+                continue
             try:
-                if f.exists():
-                    f.unlink()
+                p.unlink()
+                deleted_attach += 1
             except Exception:
                 pass
+
+        # 4) 更新快照状态：不物理删除快照，仅标记 status=已回滚，写回滚元信息
+        rollback_info = {
+            "restored_count": restored_count,
+            "skipped_manual_count": skipped_manual_count,
+            "skipped_missing_count": skipped_missing_count,
+            "deleted_attach_count": deleted_attach,
+            "retained_attach_count": retained_attach,
+            "rollback_operator": getattr(target, "operator", "system"),
+        }
+        target.status = Snapshot.STATUS_ROLLED_BACK
+        target.rollback_at = now_str()
+        target.rollback_detail = rollback_info
+        # 同步到 index.json
+        index_path = self.snapshots_dir / "index.json"
+        index = self._read_json(index_path) or []
+        if 0 <= target_idx < len(index):
+            index[target_idx] = target.to_dict()
+            self._write_json(index_path, index)
 
         return {
             "snapshot": target,
@@ -316,4 +387,5 @@ class Storage:
             "skipped_manual_count": skipped_manual_count,
             "skipped_missing_count": skipped_missing_count,
             "deleted_attach_count": deleted_attach,
+            "retained_attach_count": retained_attach,
         }
