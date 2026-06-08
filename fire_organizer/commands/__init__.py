@@ -6,6 +6,7 @@ from .cmd_issue import issue
 from .cmd_close import close
 from .cmd_report import report
 from .cmd_export import export
+from .cmd_photo import photo
 
 __all__ = [
     "init",
@@ -16,4 +17,5 @@ __all__ = [
     "close",
     "report",
     "export",
+    "photo",
 ]

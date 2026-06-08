@@ -3,7 +3,7 @@ from datetime import date
 
 from .storage import Storage
 from .commands import (
-    init, import_cmd, check, plan, issue, close, report, export
+    init, import_cmd, check, plan, issue, close, report, export, photo
 )
 
 
@@ -20,21 +20,27 @@ BANNER = """
 消防资料整理器 - 为安全员设计的本地批量消防检查资料维护工具。
 
 \b
-支持的8大命令：
+支持的命令：
   init      初始化项目目录结构
   import    导入设备清单 (Excel/CSV)
   check     校验编号重复和必填项完整性
-  plan      按楼栋生成巡检计划
+  plan      巡检计划（生成/导入/回滚/历史查询）
   issue     隐患管理（登记/修改/查询/列缺照片/操作日志）
   close     关闭已复查通过的隐患
-  report    报告管理（月度汇总/整改台账/检查报告/逾期筛选）
+  report    报告管理（月度汇总/整改台账/检查报告/逾期筛选/月度检查包）
   export    导出工具（批量重命名附件/导出交付包）
+  photo     照片管理（缺失/重复/未引用校验 + 丢失照片重关联）
 
 \b
 常用示例：
   fire-org init -n "A厂区消防项目" -a "华东区" -m "张工"
   fire-org import devices.xlsx --append
   fire-org plan -d 2026-06-10 -i "李工" -b "1号楼"
+  fire-org plan import 巡检表.xlsx --dry-run --export-diff
+  fire-org plan imports
+  fire-org plan rollback --last
+  fire-org photo audit -v
+  fire-org report package -y 2026 -m 6 -a 华东区 --zip
   fire-org issue add -d FH-001 -D "灭火器压力不足" -v 一般 -e 2026-06-20
   fire-org check --details
   fire-org report summary -y 2026 -m 6
@@ -58,6 +64,7 @@ cli.add_command(issue, name="issue")
 cli.add_command(close, name="close")
 cli.add_command(report, name="report")
 cli.add_command(export, name="export")
+cli.add_command(photo, name="photo")
 
 
 @cli.command(name="status")

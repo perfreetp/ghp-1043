@@ -450,3 +450,352 @@ def report_overdue(area: str, building: str, severity: str, export: bool):
         df.to_excel(path, index=False, sheet_name="逾期清单")
         click.echo("")
         click.echo(click.style(f"已导出：{path}", fg="green"))
+
+
+@report.command("package")
+@click.option("--year", "-y", type=int, default=None, help="年份（默认今年）")
+@click.option("--month", "-m", type=int, default=None, help="月份（默认本月）")
+@click.option("--area", "-a", default="", help="按区域筛选")
+@click.option("--building", "-b", default="", help="按楼栋筛选")
+@click.option("--zip/--no-zip", default=False, help="打包为 zip 压缩包")
+def report_package(year, month, area, building, zip):
+    """月度检查包：一次生成汇总+每日检查报告+台账+缺照片+附件索引。"""
+    storage = Storage()
+    if not storage.is_initialized():
+        click.echo(click.style("错误：请先运行 init 初始化项目", fg="red"))
+        return
+    if pd is None:
+        click.echo(click.style("错误：未安装 pandas，请运行 pip install pandas openpyxl", fg="red"))
+        return
+
+    today = date.today()
+    year = year or today.year
+    month = month or today.month
+    if not (1 <= month <= 12):
+        click.echo(click.style("错误：月份必须在 1-12 之间", fg="red"))
+        return
+
+    # 准备基础数据
+    plans = storage.get_plans()
+    issues = storage.get_issues()
+    devices = storage.get_devices()
+    dev_dict = {d.device_id: d for d in devices}
+    dev_floor_map = {d.device_id: d.floor for d in devices}
+
+    # 按条件筛选
+    def _filter(objs):
+        r = objs
+        if area:
+            r = filter_by_area(r, area)
+        if building:
+            r = filter_by_building(r, building)
+        return r
+
+    month_plan_all = [p for p in plans if is_in_month(p.plan_date, year, month)]
+    month_plans = _filter(month_plan_all)
+    plans_checked_this_month = _filter([
+        p for p in plans
+        if p.check_date and is_in_month(p.check_date, year, month)
+        and p.status in ("已完成", "有隐患")
+    ])
+    month_issues = _filter([i for i in issues if is_in_month(i.report_date, year, month)])
+    month_closed = _filter([i for i in issues if i.close_date and is_in_month(i.close_date, year, month)])
+
+    # 检查包目标目录
+    area_suffix = f"_{area}" if area else ""
+    bld_suffix = f"_{building}" if building else ""
+    pkg_dirname = f"月度检查包_{year}年{month:02d}月{area_suffix}{bld_suffix}"
+    pkg_dir = storage.reports_dir / pkg_dirname
+    pkg_dir.mkdir(parents=True, exist_ok=True)
+
+    # ========== Sheet 1: 月度汇总 ==========
+    total_p = len(month_plans)
+    done_plan = len([p for p in month_plans if p.status in ("已完成", "有隐患")])
+    done_actual = len(plans_checked_this_month)
+    pending_p = total_p - done_plan
+    issue_p = len([p for p in month_plans if p.status == "有隐患"])
+    issue_actual = len([p for p in plans_checked_this_month if p.status == "有隐患"])
+    overdue_plans = _filter([
+        p for p in plans if p.check_date and p.plan_date and p.check_date > p.plan_date
+        and is_in_month(p.check_date, year, month)
+    ])
+
+    summary_rows = [
+        {"项目": "月份", "数值": f"{year}年{month:02d}月"},
+        {"项目": "区域", "数值": area or "（全部）"},
+        {"项目": "楼栋", "数值": building or "（全部）"},
+        {"项目": "生成时间", "数值": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+        {"项目": "", "数值": ""},
+        {"项目": "本月计划总数", "数值": total_p},
+        {"项目": "计划内已完成（按计划日期）", "数值": done_plan},
+        {"项目": "本月实际完成（按检查日期）", "数值": done_actual},
+        {"项目": "待执行", "数值": pending_p},
+        {"项目": "计划中发现隐患", "数值": issue_p},
+        {"项目": "本月实际发现隐患", "数值": issue_actual},
+        {"项目": "延期完成的计划（跨月/补检）", "数值": len(overdue_plans)},
+        {"项目": "", "数值": ""},
+        {"项目": "隐患：本月新增", "数值": len(month_issues)},
+        {"项目": "隐患：本月关闭", "数值": len(month_closed)},
+    ]
+
+    # ========== Sheet 2: 每日检查报告（每日一个数据块） ==========
+    # 收集该月所有出现计划/检查的日期
+    date_set = set()
+    for p in month_plans:
+        date_set.add(("plan", p.plan_date))
+        if p.check_date:
+            date_set.add(("check", p.check_date))
+    for p in plans_checked_this_month:
+        date_set.add(("check", p.check_date))
+        if p.plan_date:
+            date_set.add(("plan", p.plan_date))
+    # 去重日期后排序
+    day_dates = sorted(set(d for _, d in date_set))
+
+    inspection_rows = []
+    for d in day_dates:
+        by_plan = [p for p in month_plans if p.plan_date == d]
+        by_check = [p for p in (month_plans + plans_checked_this_month) if p.check_date == d]
+        if not by_plan and not by_check:
+            continue
+        day_total = len(set(p.plan_id for p in (by_plan + by_check)))
+        day_done = len(set(p.plan_id for p in (by_plan + by_check) if p.status != "待执行"))
+        day_issue = len(set(p.plan_id for p in (by_plan + by_check) if p.status == "有隐患"))
+        inspection_rows.append({
+            "日期类型": f"--- {d} ---", "计划编号": "", "设备编号": "", "设备名称": "",
+            "楼栋": "", "楼层": "", "状态": f"涉及{day_total}项/已检查{day_done}项/隐患{day_issue}项",
+            "计划日期": "", "实际检查日期": "", "延期标记": "", "巡检人": "", "检查结果": "", "照片数": ""
+        })
+        day_pids = set()
+        for p in by_plan + by_check:
+            if p.plan_id in day_pids:
+                continue
+            day_pids.add(p.plan_id)
+            dev = dev_dict.get(p.device_id)
+            overdue_tag = "是" if (p.check_date and p.plan_date and p.check_date > p.plan_date) else ""
+            inspection_rows.append({
+                "日期类型": "", "计划编号": p.plan_id, "设备编号": p.device_id,
+                "设备名称": dev.name if dev else "",
+                "楼栋": p.building, "楼层": p.floor,
+                "状态": p.status,
+                "计划日期": p.plan_date or "",
+                "实际检查日期": p.check_date or "",
+                "延期标记": overdue_tag,
+                "巡检人": p.inspector or "",
+                "检查结果": p.result or "",
+                "照片数": len(p.photo_paths or []),
+            })
+
+    # ========== Sheet 3: 整改台账 ==========
+    ledger_rows = []
+    all_month_issues = month_issues  # 新增的
+    # 再加上：该月关闭（不管之前哪个月新增）但状态是已关闭的也纳入
+    for i in _filter(issues):
+        if is_in_month(i.report_date, year, month) or (i.close_date and is_in_month(i.close_date, year, month)):
+            if any(ir["隐患编号"] == i.issue_id for ir in ledger_rows):
+                continue
+            real_floor = i.floor
+            if not real_floor:
+                real_floor = dev_floor_map.get(i.device_id, "")
+            ledger_rows.append({
+                "隐患编号": i.issue_id,
+                "设备编号": i.device_id,
+                "严重程度": i.severity,
+                "状态": i.status,
+                "是否逾期": "是" if i.is_overdue else "否",
+                "楼栋": i.building,
+                "楼层": real_floor,
+                "区域": i.area,
+                "发现日期": i.report_date,
+                "整改期限": i.deadline,
+                "登记人": i.reporter,
+                "隐患描述": i.description,
+                "整改措施": i.rectification,
+                "复查人": i.reviewer,
+                "关闭日期": i.close_date or "",
+            })
+
+    # ========== Sheet 4: 缺照片清单 ==========
+    missing_rows = []
+    for p in (month_plans + plans_checked_this_month):
+        if p.status != "待执行" and not p.photo_paths:
+            dev = dev_dict.get(p.device_id)
+            missing_rows.append({
+                "来源类型": "计划",
+                "编号": p.plan_id,
+                "关联设备": p.device_id,
+                "设备名称": dev.name if dev else "",
+                "楼栋/楼层": f"{p.building} {p.floor}",
+                "计划日期": p.plan_date or "",
+                "实际检查日期": p.check_date or "",
+                "当前状态": p.status,
+                "缺失字段": "photo_paths",
+                "备注": p.result or "",
+            })
+    for i in _filter(issues):
+        if i.status == "待整改" and not i.photo_before:
+            real_floor = i.floor or dev_floor_map.get(i.device_id, "")
+            missing_rows.append({
+                "来源类型": "隐患(整改前)",
+                "编号": i.issue_id,
+                "关联设备": i.device_id,
+                "设备名称": dev_dict.get(i.device_id).name if dev_dict.get(i.device_id) else "",
+                "楼栋/楼层": f"{i.building} {real_floor}",
+                "计划日期": "", "实际检查日期": i.report_date,
+                "当前状态": i.status,
+                "缺失字段": "photo_before",
+                "备注": i.description,
+            })
+        if i.status == "已关闭" and not i.photo_after:
+            real_floor = i.floor or dev_floor_map.get(i.device_id, "")
+            missing_rows.append({
+                "来源类型": "隐患(整改后)",
+                "编号": i.issue_id,
+                "关联设备": i.device_id,
+                "设备名称": dev_dict.get(i.device_id).name if dev_dict.get(i.device_id) else "",
+                "楼栋/楼层": f"{i.building} {real_floor}",
+                "计划日期": "", "实际检查日期": i.close_date or "",
+                "当前状态": i.status,
+                "缺失字段": "photo_after",
+                "备注": i.rectification or "",
+            })
+
+    # ========== Sheet 5: 附件目录说明（计划照片 + 隐患照片映射） ==========
+    attach_rows = []
+    for p in (month_plans + plans_checked_this_month):
+        if not p.photo_paths:
+            continue
+        dev = dev_dict.get(p.device_id)
+        for idx, ph in enumerate(p.photo_paths, 1):
+            abs_p = storage.project_path / ph
+            size = abs_p.stat().st_size if abs_p.exists() else -1
+            overdue_tag = "是" if (p.check_date and p.plan_date and p.check_date > p.plan_date) else ""
+            attach_rows.append({
+                "关联类型": "巡检计划",
+                "关联编号": p.plan_id,
+                "关联设备": p.device_id,
+                "设备名称": dev.name if dev else "",
+                "计划日期": p.plan_date or "",
+                "实际检查日期": p.check_date or "",
+                "延期完成": overdue_tag,
+                "计划状态": p.status,
+                "照片序号": f"{idx}/{len(p.photo_paths)}",
+                "附件相对路径": ph,
+                "文件大小(字节)": size if size >= 0 else "(文件不存在)",
+            })
+    for i in _filter(issues):
+        if not (i.photo_before or i.photo_after):
+            continue
+        dev = dev_dict.get(i.device_id)
+        real_floor = i.floor or dev_floor_map.get(i.device_id, "")
+        for idx, ph in enumerate(i.photo_before, 1):
+            abs_p = storage.project_path / ph
+            size = abs_p.stat().st_size if abs_p.exists() else -1
+            attach_rows.append({
+                "关联类型": "隐患(整改前)",
+                "关联编号": i.issue_id,
+                "关联设备": i.device_id,
+                "设备名称": dev.name if dev else "",
+                "计划日期": "",
+                "实际检查日期": i.report_date,
+                "延期完成": "",
+                "计划状态": i.status,
+                "照片序号": f"前{idx}/{len(i.photo_before)}",
+                "附件相对路径": ph,
+                "文件大小(字节)": size if size >= 0 else "(文件不存在)",
+            })
+        for idx, ph in enumerate(i.photo_after, 1):
+            abs_p = storage.project_path / ph
+            size = abs_p.stat().st_size if abs_p.exists() else -1
+            attach_rows.append({
+                "关联类型": "隐患(整改后)",
+                "关联编号": i.issue_id,
+                "关联设备": i.device_id,
+                "设备名称": dev.name if dev else "",
+                "计划日期": "",
+                "实际检查日期": i.close_date or "",
+                "延期完成": "",
+                "计划状态": i.status,
+                "照片序号": f"后{idx}/{len(i.photo_after)}",
+                "附件相对路径": ph,
+                "文件大小(字节)": size if size >= 0 else "(文件不存在)",
+            })
+
+    # ========== Sheet 6: 延期完成计划清单 ==========
+    overdue_rows = []
+    for p in _filter(plans):
+        if p.check_date and p.plan_date and p.check_date > p.plan_date:
+            try:
+                from datetime import datetime as _dt
+                d1 = _dt.strptime(p.plan_date, "%Y-%m-%d").date()
+                d2 = _dt.strptime(p.check_date, "%Y-%m-%d").date()
+                days = (d2 - d1).days
+            except:
+                days = "?"
+            dev = dev_dict.get(p.device_id)
+            overdue_rows.append({
+                "计划编号": p.plan_id,
+                "设备编号": p.device_id,
+                "设备名称": dev.name if dev else "",
+                "楼栋": p.building,
+                "楼层": p.floor,
+                "计划日期": p.plan_date,
+                "实际检查日期": p.check_date,
+                "延期天数": days,
+                "巡检人": p.inspector or "",
+                "状态": p.status,
+                "检查结果": (p.result or "")[:80],
+            })
+
+    # ========== 写入 Excel ==========
+    pkg_file = pkg_dir / f"月度检查包_{year}年{month:02d}月{area_suffix}{bld_suffix}.xlsx"
+    with pd.ExcelWriter(pkg_file, engine="openpyxl") as writer:
+        pd.DataFrame(summary_rows).to_excel(writer, index=False, sheet_name="月度汇总")
+        pd.DataFrame(inspection_rows).to_excel(writer, index=False, sheet_name="每日检查报告")
+        pd.DataFrame(ledger_rows).to_excel(writer, index=False, sheet_name="整改台账")
+        pd.DataFrame(missing_rows).to_excel(writer, index=False, sheet_name="缺照片清单")
+        pd.DataFrame(attach_rows).to_excel(writer, index=False, sheet_name="附件目录说明")
+        pd.DataFrame(overdue_rows).to_excel(writer, index=False, sheet_name="延期完成计划")
+
+    # ========== 如果 --zip：复制附件并打包 ==========
+    if zip:
+        import shutil as _shutil
+        # 复制相关附件到 pkg_dir/附件照片/
+        attach_dst_dir = pkg_dir / "附件照片"
+        copied_rel = set()
+        for r in attach_rows:
+            rel = r["附件相对路径"]
+            if rel in copied_rel:
+                continue
+            src = storage.project_path / rel
+            if src.exists():
+                dst = attach_dst_dir / Path(rel).name
+                # 避免同名覆盖
+                i = 1
+                while dst.exists():
+                    dst = attach_dst_dir / f"{Path(rel).stem}_{i}{Path(rel).suffix}"
+                    i += 1
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                _shutil.copy2(src, dst)
+                copied_rel.add(rel)
+        # 打 zip
+        zip_base = str(pkg_dir)
+        zip_path = _shutil.make_archive(zip_base, "zip", root_dir=pkg_dir.parent, base_dir=pkg_dir.name)
+        click.echo(click.style(f"已生成 zip 包：{zip_path}", fg="green", bold=True))
+
+    click.echo(click.style("=" * 80, fg="cyan", bold=True))
+    click.echo(click.style(f"  月度检查包生成完成 - {year}年{month:02d}月{area_suffix}{bld_suffix}", fg="cyan", bold=True))
+    click.echo(click.style("=" * 80, fg="cyan", bold=True))
+    click.echo(f"  目录：{pkg_dir}")
+    click.echo(f"  主文件：{pkg_file}")
+    click.echo("")
+    click.echo(f"  包含 Sheet：")
+    click.echo(f"    • 月度汇总 ({len(summary_rows)} 项指标)")
+    click.echo(f"    • 每日检查报告 ({len(day_dates)} 天, {len([r for r in inspection_rows if r['日期类型']==''])} 条记录)")
+    click.echo(f"    • 整改台账 ({len(ledger_rows)} 条)")
+    click.echo(f"    • 缺照片清单 ({len(missing_rows)} 项)")
+    click.echo(f"    • 附件目录说明 ({len(attach_rows)} 条照片映射)")
+    click.echo(f"    • 延期完成计划 ({len(overdue_rows)} 条)")
+    if zip:
+        click.echo(f"    • 附件照片 ({len(copied_rel)} 个文件已复制)")
+

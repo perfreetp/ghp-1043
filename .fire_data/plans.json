@@ -7,10 +7,12 @@
     "plan_date": "2026-06-09",
     "inspector": "",
     "area": "华东区",
-    "status": "待执行",
-    "check_date": null,
-    "result": "",
-    "photo_paths": []
+    "status": "有隐患",
+    "check_date": "2026-06-09",
+    "result": "压力正常/标签完好；正常检查；手工追加：发现密封垫老化",
+    "photo_paths": [
+      "attachments\\PLBD8C195CADB9\\20260609_012329_FH001_灭火器.jpg"
+    ]
   },
   {
     "plan_id": "PL486C95CA38C4",

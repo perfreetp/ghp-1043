@@ -25,7 +25,7 @@ IMPORTS_DIR = "imports"
 
 
 class Snapshot:
-    """导入前快照，用于回滚。"""
+    """导入前快照，用于回滚和导入历史查询。"""
 
     def __init__(
         self,
@@ -35,6 +35,10 @@ class Snapshot:
         source_file: str,
         plan_ids_affected: List[str],
         copied_attachments: List[str],
+        success_count: int = 0,
+        skip_count: int = 0,
+        warn_count: int = 0,
+        diff_file_path: str = "",
     ):
         self.snapshot_id = snapshot_id
         self.created_at = created_at
@@ -42,6 +46,10 @@ class Snapshot:
         self.source_file = source_file
         self.plan_ids_affected = plan_ids_affected
         self.copied_attachments = copied_attachments
+        self.success_count = success_count
+        self.skip_count = skip_count
+        self.warn_count = warn_count
+        self.diff_file_path = diff_file_path
 
     def to_dict(self) -> Dict:
         return {
@@ -51,6 +59,10 @@ class Snapshot:
             "source_file": self.source_file,
             "plan_ids_affected": self.plan_ids_affected,
             "copied_attachments": self.copied_attachments,
+            "success_count": self.success_count,
+            "skip_count": self.skip_count,
+            "warn_count": self.warn_count,
+            "diff_file_path": self.diff_file_path,
         }
 
     @classmethod
@@ -169,15 +181,23 @@ class Storage:
 
     def save_plan_snapshot(
         self, operator: str, source_file: str,
-        original_plans: List, affected_plan_ids: List[str],
+        original_plans: List, post_plans: List,
+        affected_plan_ids: List[str],
         copied_attachments: List[str],
+        success_count: int = 0, skip_count: int = 0, warn_count: int = 0,
+        diff_file_path: str = "", diff_rows: Optional[List[Dict]] = None,
     ) -> Snapshot:
-        """保存 plans 快照，用于回滚。"""
+        """保存 plans 快照（导入前+导入后），用于回滚和导入历史查询。"""
         self.snapshots_dir.mkdir(parents=True, exist_ok=True)
         snapshot_id = generate_id("SN")
         created_at = now_str()
         plans_backup_path = self.snapshots_dir / f"{snapshot_id}_plans.json"
+        plans_post_path = self.snapshots_dir / f"{snapshot_id}_plans_post.json"
+        diff_backup_path = self.snapshots_dir / f"{snapshot_id}_diff.json"
         self._write_json(plans_backup_path, [p.to_dict() for p in original_plans])
+        self._write_json(plans_post_path, [p.to_dict() for p in post_plans])
+        if diff_rows is not None:
+            self._write_json(diff_backup_path, diff_rows)
         snapshot = Snapshot(
             snapshot_id=snapshot_id,
             created_at=created_at,
@@ -185,6 +205,10 @@ class Storage:
             source_file=source_file,
             plan_ids_affected=affected_plan_ids,
             copied_attachments=copied_attachments,
+            success_count=success_count,
+            skip_count=skip_count,
+            warn_count=warn_count,
+            diff_file_path=diff_file_path,
         )
         index_path = self.snapshots_dir / "index.json"
         index = self._read_json(index_path) or []
@@ -200,17 +224,72 @@ class Storage:
         data = self._read_json(index_path) or []
         return [Snapshot.from_dict(d) for d in data]
 
-    def rollback_plan_snapshot(self, snapshot_id: str) -> Optional[Snapshot]:
-        """按快照 ID 回滚 plans 并清理附件，成功返回快照。"""
+    def get_snapshot_diff_rows(self, snapshot_id: str) -> Optional[List[Dict]]:
+        """读取快照保存的差异清单。"""
+        diff_path = self.snapshots_dir / f"{snapshot_id}_diff.json"
+        if not diff_path.exists():
+            return None
+        return self._read_json(diff_path)
+
+    def rollback_plan_snapshot(self, snapshot_id: str) -> Optional[Dict]:
+        """按快照 ID 细粒度回滚：只恢复本次导入改过且之后未手工修改的计划。
+        返回 dict: {snapshot, restored_count, skipped_manual_count, deleted_attach_count}
+        """
         snapshots = self.list_plan_snapshots()
         target = next((s for s in snapshots if s.snapshot_id == snapshot_id), None)
         if target is None:
             return None
-        backup_file = self.snapshots_dir / f"{snapshot_id}_plans.json"
-        if backup_file.exists():
-            plans_data = self._read_json(backup_file)
-            restored = [PlanItem.from_dict(d) for d in plans_data]
-            self.save_plans(restored)
+
+        orig_file = self.snapshots_dir / f"{snapshot_id}_plans.json"
+        post_file = self.snapshots_dir / f"{snapshot_id}_plans_post.json"
+        has_post = post_file.exists()
+
+        # 1) 读取三种状态
+        current_plans = self.get_plans()
+        current_map = {p.plan_id: p for p in current_plans}
+        orig_map = {}
+        if orig_file.exists():
+            orig_list = [PlanItem.from_dict(d) for d in self._read_json(orig_file)]
+            orig_map = {p.plan_id: p for p in orig_list}
+        post_map = {}
+        if has_post:
+            post_list = [PlanItem.from_dict(d) for d in self._read_json(post_file)]
+            post_map = {p.plan_id: p for p in post_list}
+
+        # 2) 差分判断：对每个 affected_plan_id，若 cur==post（之后未改）才恢复为 orig
+        restored_count = 0
+        skipped_manual_count = 0
+        skipped_missing_count = 0
+        for pid in target.plan_ids_affected:
+            cur_p = current_map.get(pid)
+            if cur_p is None:
+                skipped_missing_count += 1
+                continue
+            post_p = post_map.get(pid) if has_post else None
+            orig_p = orig_map.get(pid)
+            # 判断 cur 的关键字段是否仍等于 post（导入后状态）
+            fields_eq = True
+            if post_p is not None:
+                def _sig(p):
+                    return (p.status, p.check_date, p.result, tuple(sorted(p.photo_paths or [])))
+                if _sig(cur_p) != _sig(post_p):
+                    fields_eq = False
+            if fields_eq and orig_p is not None:
+                # 恢复为导入前状态：只替换关键4字段，保留其他可能的新增字段
+                cur_p.status = orig_p.status
+                cur_p.check_date = orig_p.check_date
+                cur_p.result = orig_p.result
+                cur_p.photo_paths = list(orig_p.photo_paths or [])
+                restored_count += 1
+            elif not fields_eq:
+                skipped_manual_count += 1
+            else:
+                skipped_missing_count += 1
+
+        # 保存修改后的 plans
+        self.save_plans(current_plans)
+
+        # 3) 清理附件
         deleted_attach = 0
         for rel in target.copied_attachments:
             p = self.project_path / rel
@@ -220,12 +299,21 @@ class Storage:
                     deleted_attach += 1
                 except Exception:
                     pass
+
+        # 4) 清理快照文件并更新 index
         index = [s for s in snapshots if s.snapshot_id != snapshot_id]
         self._write_json(self.snapshots_dir / "index.json", [s.to_dict() for s in index])
-        try:
-            if backup_file.exists():
-                backup_file.unlink()
-        except Exception:
-            pass
-        target.copied_attachments = [f"已删除({deleted_attach}个)"]
-        return target
+        for f in [orig_file, post_file, self.snapshots_dir / f"{snapshot_id}_diff.json"]:
+            try:
+                if f.exists():
+                    f.unlink()
+            except Exception:
+                pass
+
+        return {
+            "snapshot": target,
+            "restored_count": restored_count,
+            "skipped_manual_count": skipped_manual_count,
+            "skipped_missing_count": skipped_missing_count,
+            "deleted_attach_count": deleted_attach,
+        }

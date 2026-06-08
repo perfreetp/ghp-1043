@@ -70,5 +70,23 @@
     "operator": "system",
     "timestamp": "2026-06-09 01:12:15",
     "details": "生成月度汇总报告: 2026年06月"
+  },
+  {
+    "log_id": "LOGFE991250376E",
+    "action": "plan_import",
+    "target_type": "plan",
+    "target_id": "4条",
+    "operator": "system",
+    "timestamp": "2026-06-09 01:23:29",
+    "details": "导入巡检结果: 填写好的巡检结果.csv, 成功4条, 跳过3条, 快照SN8120DE713AAA"
+  },
+  {
+    "log_id": "LOG23E77F0A944E",
+    "action": "plan_rollback",
+    "target_type": "snapshot",
+    "target_id": "SN8120DE713AAA",
+    "operator": "system",
+    "timestamp": "2026-06-09 01:25:03",
+    "details": "回滚导入快照: SN8120DE713AAA, 恢复3条, 跳过手工修改1条, 跳过缺失0条"
   }
 ]

@@ -2,6 +2,7 @@ import click
 import copy
 from pathlib import Path
 from collections import defaultdict
+from datetime import datetime
 
 try:
     import pandas as pd
@@ -74,6 +75,18 @@ def _collect_changes(storage, df, copy_photos):
     plans = storage.get_plans()
     plans_work = [copy.deepcopy(p) for p in plans]
     plan_map = {p.plan_id: p for p in plans_work}
+
+    def _preview_photo_dst(p_path_str, plan_id):
+        """仅预测照片目标位置，不实际复制。返回相对项目路径。"""
+        p_src = Path(p_path_str)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        new_name = f"{timestamp}_{p_src.name}"
+        subdir = plan_id
+        dst = storage.attachments_dir
+        if subdir:
+            dst = dst / subdir
+        rel = dst / new_name
+        return str(rel.relative_to(storage.project_path))
 
     changes_list = []
     skipped = defaultdict(list)
@@ -158,23 +171,35 @@ def _collect_changes(storage, df, copy_photos):
 
         new_photos_to_list = []
         warn_messages = []
+        photo_details = []
         if "photo_paths" in df.columns:
             raw_photos = row.get("photo_paths")
             photo_list = _parse_photo_paths(raw_photos)
             for p in photo_list:
                 p_path = Path(p)
-                if copy_photos and p_path.exists() and p_path.is_file():
+                exists_on_disk = p_path.exists() and p_path.is_file()
+                predicted_dst = _preview_photo_dst(str(p_path), plan_id)
+                if copy_photos and exists_on_disk:
                     try:
-                        subdir = plan_id
-                        rel = storage.copy_attachment(str(p_path), subdir)
+                        rel = storage.copy_attachment(str(p_path), plan_id)
                         new_photos_to_list.append(rel)
                         copied_attachments.append(rel)
+                        photo_details.append({
+                            "src": p, "dst": rel, "copied": True, "exists": True
+                        })
                     except Exception as e:
                         skipped["照片复制失败"].append(f"第{row_no}行 {plan_id}: {p} ({e})")
                         warn_messages.append(f"照片{p}复制失败")
+                        photo_details.append({
+                            "src": p, "dst": predicted_dst, "copied": False, "exists": exists_on_disk,
+                            "error": str(e),
+                        })
                 else:
                     new_photos_to_list.append(p)
-                    if copy_photos and not p_path.exists():
+                    photo_details.append({
+                        "src": p, "dst": predicted_dst, "copied": False, "exists": exists_on_disk,
+                    })
+                    if copy_photos and not exists_on_disk:
                         skipped["照片路径不存在(未复制)"].append(f"第{row_no}行 {plan_id}: {p}")
                         warn_messages.append(f"照片{p}不存在(未复制)")
             if new_photos_to_list:
@@ -209,6 +234,7 @@ def _collect_changes(storage, df, copy_photos):
             "new_check_date": new_check_date,
             "photos_added": len(new_photos_to_list),
             "warnings": warn_messages,
+            "photo_details": photo_details,
             "desc": change_desc,
         })
         diff_rows.append({
@@ -405,6 +431,10 @@ def plan_import(filepath, sheet, operator, copy_photos, dry_run, export_diff):
         storage, df, copy_photos if not dry_run else False
     )
 
+    warn_count = sum(len(v) for v in skipped.values())
+    skip_count = warn_count
+    success_count = len(changes_list)
+
     banner = "[预览模式] 导入巡检结果" if dry_run else "巡检结果导入完成！"
     click.echo(click.style(f"{banner}", fg="green" if not dry_run else "cyan", bold=True))
     click.echo(f"  读取行数：{len(df)}")
@@ -430,6 +460,23 @@ def plan_import(filepath, sheet, operator, copy_photos, dry_run, export_diff):
                 f"{c['row_no']:<8}{c['plan_id']:<18}{c['device_id']:<14}{c['building']:<10}"
                 f"{st_change:<28}{cd_change:<20}新增{c['photos_added']}张{warn_str}"
             )
+            for pd_item in c.get("photo_details", []):
+                exist_mark = "✓" if pd_item["exists"] else click.style("✗ 源文件不存在", fg="red")
+                if dry_run:
+                    click.echo(
+                        f"        {click.style('照片会放到:', fg='cyan')} "
+                        f"{pd_item['src']} {exist_mark}  →  {pd_item['dst']}"
+                    )
+                elif pd_item["copied"]:
+                    click.echo(
+                        f"        {click.style('已复制:', fg='green')} "
+                        f"{pd_item['src']}  →  {pd_item['dst']}"
+                    )
+                else:
+                    click.echo(
+                        f"        {click.style('未复制:', fg='yellow')} "
+                        f"{pd_item['src']} {exist_mark}"
+                    )
             if len(c["warnings"]):
                 for w in c["warnings"]:
                     click.echo(f"        警告: {w}")
@@ -448,14 +495,28 @@ def plan_import(filepath, sheet, operator, copy_photos, dry_run, export_diff):
                     click.echo(f"        · ... 还有 {len(details) - 5} 条省略")
 
     snapshot = None
+    diff_path_str = ""
+    if export_diff and pd is not None and diff_rows:
+        diff_path = storage.exports_dir / f"导入差异_{fp.stem}_{today_str()}.xlsx"
+        pd.DataFrame(diff_rows).to_excel(diff_path, index=False, sheet_name="差异清单")
+        diff_path_str = str(diff_path)
+        click.echo("")
+        click.echo(click.style(f"差异清单已导出：{diff_path}", fg="green"))
+
     if not dry_run and changes_list:
         affected_ids = [c["plan_id"] for c in changes_list]
         snapshot = storage.save_plan_snapshot(
             operator=operator,
             source_file=fp.name,
             original_plans=original_plans,
+            post_plans=plans_work,
             affected_plan_ids=affected_ids,
             copied_attachments=copied_attachments,
+            success_count=success_count,
+            skip_count=skip_count,
+            warn_count=warn_count,
+            diff_file_path=diff_path_str,
+            diff_rows=diff_rows,
         )
         storage.save_plans(plans_work)
         click.echo("")
@@ -474,12 +535,6 @@ def plan_import(filepath, sheet, operator, copy_photos, dry_run, export_diff):
             "【预览模式，未写入任何变更。确认无误后去掉 --dry-run 正式导入。",
             fg="yellow", bold=True
         ))
-
-    if export_diff and pd is not None and diff_rows:
-        diff_path = storage.exports_dir / f"导入差异_{fp.stem}_{today_str()}.xlsx"
-        pd.DataFrame(diff_rows).to_excel(diff_path, index=False, sheet_name="差异清单")
-        click.echo("")
-        click.echo(click.style(f"差异清单已导出：{diff_path}", fg="green"))
 
 
 @plan.command("snapshots")
@@ -541,14 +596,121 @@ def plan_rollback(snapshot_id, last, operator):
         click.echo(click.style(f"错误：快照 {target_id} 不存在", fg="red"))
         return
 
-    click.echo(click.style(f"回滚成功！", fg="green", bold=True))
-    click.echo(f"  恢复时间：{result.created_at}")
-    click.echo(f"  影响计划：{len(result.plan_ids_affected)} 条")
-    attach_info = ", ".join(result.copied_attachments[:5])
-    click.echo(f"  清理附件：{attach_info}")
+    snap = result["snapshot"]
+    restored = result["restored_count"]
+    skipped_manual = result["skipped_manual_count"]
+    skipped_missing = result["skipped_missing_count"]
+    deleted_attach = result["deleted_attach_count"]
+
+    click.echo(click.style(f"回滚完成！", fg="green", bold=True))
+    click.echo(f"  快照时间：{snap.created_at}")
+    click.echo(f"  来源文件：{snap.source_file}")
+    click.echo(f"  本次覆盖的计划范围：{len(snap.plan_ids_affected)} 条")
+    click.echo(click.style(f"  ✓ 成功恢复：{restored} 条", fg="green"))
+    if skipped_manual:
+        click.echo(click.style(f"  ⚠ 跳过（之后已手工修改）：{skipped_manual} 条", fg="yellow"))
+    if skipped_missing:
+        click.echo(click.style(f"  ⚠ 跳过（计划已不存在）：{skipped_missing} 条", fg="yellow"))
+    click.echo(f"  清理附件：已删除 {deleted_attach} 个文件")
 
     storage.add_log(
         "plan_rollback", "snapshot", target_id,
         operator,
-        f"回滚导入快照: {target_id}, 恢复{len(result.plan_ids_affected)}条计划"
+        f"回滚导入快照: {target_id}, 恢复{restored}条, 跳过手工修改{skipped_manual}条, 跳过缺失{skipped_missing}条"
     )
+
+
+@plan.command("imports")
+def plan_imports():
+    """列出每次巡检结果导入的历史。"""
+    storage = Storage()
+    if not storage.is_initialized():
+        click.echo(click.style("错误：请先运行 init 初始化项目", fg="red"))
+        return
+
+    snaps = storage.list_plan_snapshots()
+    if not snaps:
+        click.echo(click.style("暂无导入历史", fg="yellow"))
+        return
+
+    click.echo(click.style(
+        f"{'快照ID':<18}{'创建时间':<22}{'操作人':<10}{'来源文件':<28}"
+        f"{'成功':<6}{'跳过':<6}{'警告':<6}{'附件数':<8}{'差异清单'}",
+        fg="cyan", bold=True
+    ))
+    click.echo("-" * 150)
+    for s in reversed(snaps):
+        diff_flag = "已导出" if s.diff_file_path else ""
+        click.echo(
+            f"{s.snapshot_id:<18}{s.created_at:<22}{s.operator:<10}"
+            f"{(s.source_file[:26]+'..') if len(s.source_file)>26 else s.source_file:<28}"
+            f"{s.success_count:<8}{s.skip_count:<8}{s.warn_count:<8}"
+            f"{len(s.copied_attachments):<10}{diff_flag}"
+        )
+
+
+@plan.command("import-detail")
+@click.argument("snapshot_id", required=False, default=None)
+@click.option("--last", "-l", is_flag=True, help="查看最近一次导入")
+def plan_import_detail(snapshot_id, last):
+    """查看某次导入的差异清单和导出文件位置。"""
+    storage = Storage()
+    if not storage.is_initialized():
+        click.echo(click.style("错误：请先运行 init 初始化项目", fg="red"))
+        return
+
+    snaps = storage.list_plan_snapshots()
+    if not snaps:
+        click.echo(click.style("暂无导入历史", fg="yellow"))
+        return
+
+    if last:
+        target = snaps[-1]
+    else:
+        if not snapshot_id:
+            click.echo(click.style("请指定快照 ID 或使用 --last", fg="red"))
+            return
+        target = next((s for s in snaps if s.snapshot_id == snapshot_id), None)
+        if target is None:
+            click.echo(click.style(f"错误：快照 {snapshot_id} 不存在", fg="red"))
+            return
+
+    diff_rows = storage.get_snapshot_diff_rows(target.snapshot_id)
+
+    click.echo(click.style(f"{'='*130}", fg="cyan", bold=True))
+    click.echo(click.style(f"  导入详情 - {target.snapshot_id}", fg="cyan", bold=True))
+    click.echo(click.style(f"{'='*130}", fg="cyan", bold=True))
+    click.echo(f"  创建时间：{target.created_at}")
+    click.echo(f"  操作人：{target.operator}")
+    click.echo(f"  来源文件：{target.source_file}")
+    click.echo(f"  成功/跳过/警告：{target.success_count} / {target.skip_count} / {target.warn_count}")
+    click.echo(f"  影响计划：{', '.join(target.plan_ids_affected[:10])}"
+               + (f" ... 还有{len(target.plan_ids_affected)-10}个" if len(target.plan_ids_affected) > 10 else ""))
+    click.echo(f"  复制附件：{len(target.copied_attachments)} 个")
+    if target.diff_file_path:
+        click.echo(click.style(f"  差异清单：{target.diff_file_path}", fg="green"))
+    elif diff_rows is not None:
+        click.echo(click.style("  提示：本次未导出 --export-diff，但快照中存了差异清单数据，可用 --export-diff 重跑查看完整Excel", fg="yellow"))
+
+    if diff_rows is None:
+        click.echo(click.style("\n（快照中未发现差异清单数据）", fg="yellow"))
+        return
+
+    click.echo("")
+    click.echo(click.style("【差异清单】", fg="yellow", bold=True))
+    click.echo(click.style(
+        f"{'行号':<8}{'计划编号':<20}{'设备编号':<14}{'楼栋':<10}{'类别':<8}{'原因':<30}变更内容",
+        fg="cyan"
+    ))
+    click.echo("-" * 130)
+    for r in diff_rows:
+        reason = r.get("原因", "")
+        if len(reason) > 28:
+            reason = reason[:26] + ".."
+        desc = r.get("变更内容", "")
+        if len(desc) > 70:
+            desc = desc[:68] + ".."
+        click.echo(
+            f"{str(r.get('行号','')):<8}{r.get('计划编号',''):<20}{r.get('设备编号',''):<14}"
+            f"{r.get('楼栋',''):<10}{r.get('类别',''):<8}{reason:<30}{desc}"
+        )
